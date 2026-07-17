@@ -1,0 +1,10 @@
+{
+  "name": "podseek",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -n backend,frontend -c blue,green \"node worker.js\" \"npm --prefix frontend run dev\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.6"
+  }
+}
