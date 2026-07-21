@@ -33,7 +33,7 @@ export default function WatchPage() {
           router.push(`/watch?id=${data.mediaId}&url=${safeUrl}&title=Analyzed%20Media`);
           setNewUrl('');
         } else {
-          alert("Failed to start processing. Check backend logs.");
+          alert(data.error || "Failed to start processing. Check backend logs.");
         }
       } catch {
         alert("Server connection failed. Is your backend running?");
