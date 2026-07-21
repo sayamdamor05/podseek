@@ -43,9 +43,11 @@ function WatchWorkspace() {
     let cancelled = false;
     let intervalId: ReturnType<typeof setInterval> | null = null;
 
+    const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+
     const pollProcessingStatus = async () => {
       try {
-        const res = await fetch(`http://localhost:3001/api/media-status?mediaId=${mediaId}`);
+        const res = await fetch(`${API_BASE}/api/media-status?mediaId=${mediaId}`);
         if (!res.ok) {
           if (res.status === 404) {
             if (!cancelled) {
@@ -132,7 +134,7 @@ function WatchWorkspace() {
     setIsSearching(true);
     setError('');
     try {
-      const res = await fetch('http://localhost:3001/api/search', {
+      const res = await fetch(`${API_BASE}/api/search`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query, mediaId }),
@@ -168,7 +170,7 @@ function WatchWorkspace() {
 
     setIsIngesting(true);
     try {
-      const res = await fetch('http://localhost:3001/api/ingest', {
+      const res = await fetch(`${API_BASE}/api/ingest`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ videoUrl: newUrl }),

@@ -18,8 +18,9 @@ export default function WatchPage() {
     e?.preventDefault();
     if (newUrl.trim() !== '') {
       setIsIngesting(true);
+      const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
       try {
-        const res = await fetch('http://localhost:3001/api/ingest', {
+        const res = await fetch(`${API_BASE}/api/ingest`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ videoUrl: newUrl })
