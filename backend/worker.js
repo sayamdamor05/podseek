@@ -21,7 +21,7 @@ const pool = process.env.DATABASE_URL
     })
   : null;
 
-// In-memory fallback storage when DATABASE_URL is not configured on hosting service
+// In-memory fallback storage when DATABASE_URL is not configured or throws error
 const memoryDb = {
   mediaFiles: new Map(),
   segments: [],
@@ -29,13 +29,31 @@ const memoryDb = {
   nextSegmentId: 1,
 };
 
+let dbInitialized = false;
+
+async function ensureDbInit() {
+  if (pool && !dbInitialized) {
+    try {
+      await initDb();
+      dbInitialized = true;
+    } catch (e) {
+      console.warn('⚠️ Dynamic initDb failed:', e.message);
+    }
+  }
+}
+
 async function dbInsertMediaFile(videoUrl) {
+  await ensureDbInit();
   if (pool) {
-    const dbRes = await pool.query(
-      "INSERT INTO media_files (url, status) VALUES ($1, 'processing') RETURNING id",
-      [videoUrl]
-    );
-    return dbRes.rows[0].id;
+    try {
+      const dbRes = await pool.query(
+        "INSERT INTO media_files (url, status) VALUES ($1, 'processing') RETURNING id",
+        [videoUrl]
+      );
+      return dbRes.rows[0].id;
+    } catch (e) {
+      console.warn('⚠️ PostgreSQL insert failed, using in-memory store fallback:', e.message);
+    }
   }
   const id = memoryDb.nextMediaId++;
   memoryDb.mediaFiles.set(id, { id, url: videoUrl, status: 'processing', created_at: new Date() });
@@ -44,17 +62,26 @@ async function dbInsertMediaFile(videoUrl) {
 
 async function dbUpdateMediaStatus(mediaId, status) {
   if (pool) {
-    await pool.query("UPDATE media_files SET status = $1 WHERE id = $2", [status, mediaId]);
-  } else {
-    const record = memoryDb.mediaFiles.get(Number(mediaId));
-    if (record) record.status = status;
+    try {
+      await pool.query("UPDATE media_files SET status = $1 WHERE id = $2", [status, mediaId]);
+      return;
+    } catch (e) {
+      console.warn('⚠️ PostgreSQL status update failed:', e.message);
+    }
   }
+  const record = memoryDb.mediaFiles.get(Number(mediaId));
+  if (record) record.status = status;
 }
 
 async function dbGetMediaStatus(mediaId) {
+  await ensureDbInit();
   if (pool) {
-    const mediaRes = await pool.query('SELECT status FROM media_files WHERE id = $1', [mediaId]);
-    return mediaRes.rows.length > 0 ? mediaRes.rows[0].status : null;
+    try {
+      const mediaRes = await pool.query('SELECT status FROM media_files WHERE id = $1', [mediaId]);
+      if (mediaRes.rows.length > 0) return mediaRes.rows[0].status;
+    } catch (e) {
+      console.warn('⚠️ PostgreSQL status lookup failed:', e.message);
+    }
   }
   const record = memoryDb.mediaFiles.get(Number(mediaId));
   return record ? record.status : null;
@@ -62,32 +89,40 @@ async function dbGetMediaStatus(mediaId) {
 
 async function dbInsertSegment(mediaId, start, end, text, embeddingJson) {
   if (pool) {
-    await pool.query(
-      `INSERT INTO transcript_segments (media_id, start_time, end_time, text, embedding)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [mediaId, start, end, text, embeddingJson]
-    );
-  } else {
-    memoryDb.segments.push({
-      id: memoryDb.nextSegmentId++,
-      media_id: Number(mediaId),
-      start_time: start,
-      end_time: end,
-      text,
-      embedding: embeddingJson,
-    });
+    try {
+      await pool.query(
+        `INSERT INTO transcript_segments (media_id, start_time, end_time, text, embedding)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [mediaId, start, end, text, embeddingJson]
+      );
+      return;
+    } catch (e) {
+      console.warn('⚠️ PostgreSQL segment insert failed:', e.message);
+    }
   }
+  memoryDb.segments.push({
+    id: memoryDb.nextSegmentId++,
+    media_id: Number(mediaId),
+    start_time: start,
+    end_time: end,
+    text,
+    embedding: embeddingJson,
+  });
 }
 
 async function dbGetSegments(mediaId) {
   if (pool) {
-    const dbResult = await pool.query(
-      `SELECT id, text, start_time, end_time, embedding
-       FROM transcript_segments
-       WHERE media_id = $1`,
-      [mediaId]
-    );
-    return dbResult.rows || [];
+    try {
+      const dbResult = await pool.query(
+        `SELECT id, text, start_time, end_time, embedding
+         FROM transcript_segments
+         WHERE media_id = $1`,
+        [mediaId]
+      );
+      if (dbResult.rows && dbResult.rows.length > 0) return dbResult.rows;
+    } catch (e) {
+      console.warn('⚠️ PostgreSQL segment lookup failed:', e.message);
+    }
   }
   return memoryDb.segments.filter((s) => s.media_id === Number(mediaId));
 }
@@ -117,14 +152,19 @@ async function initDb() {
       embedding JSONB NOT NULL
     )
   `);
+  dbInitialized = true;
 }
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function extractVideoId(url) {
+  if (!url) return null;
   const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
   const match = url.match(regExp);
-  return (match && match[2].length === 11) ? match[2] : null;
+  if (match && match[2] && match[2].length >= 8 && match[2].length <= 16) {
+    return match[2];
+  }
+  return null;
 }
 
 function cosineSimilarity(vecA, vecB) {
