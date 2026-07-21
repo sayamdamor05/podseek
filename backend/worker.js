@@ -10,11 +10,14 @@ const app = express();
 app.use(express.json());
 
 app.use(cors({
-  origin: 'http://localhost:3000',
+  origin: process.env.FRONTEND_URL || '*',
 }));
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL?.includes('localhost') ? false : { rejectUnauthorized: false }
+});
 
 async function initDb() {
   await pool.query(`
@@ -402,8 +405,8 @@ app.post('/api/search', async (req, res) => {
 
 app.get('/', (req, res) => res.send('API Alive!'));
 
-await initDb();
-app.listen(3001, () => console.log('🚀 PodSeek server running on port 3001'));
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => console.log(`🚀 PodSeek server running on port ${PORT}`));
 
 initDb().catch((error) => {
   console.error('Database initialization failed:', error.message);
