@@ -20,17 +20,28 @@ export default function WatchPage() {
       setIsIngesting(true);
       const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
       try {
+        let fetchedTitle = 'Analyzed Media';
+        try {
+          const titleRes = await fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(newUrl)}&format=json`);
+          if (titleRes.ok) {
+            const titleData = await titleRes.json();
+            if (titleData.title) fetchedTitle = titleData.title;
+          }
+        } catch {
+          // oEmbed fallback
+        }
+
         const res = await fetch(`${API_BASE}/api/ingest`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ videoUrl: newUrl })
         });
         const data = await res.json();
-        
+
         if (data.mediaId) {
           const safeUrl = encodeURIComponent(newUrl);
-          // Push to the new video URL and clear the input box
-          router.push(`/watch?id=${data.mediaId}&url=${safeUrl}&title=Analyzed%20Media`);
+          const safeTitle = encodeURIComponent(fetchedTitle);
+          router.push(`/watch?id=${data.mediaId}&url=${safeUrl}&title=${safeTitle}`);
           setNewUrl('');
         } else {
           alert(data.error || "Failed to start processing. Check backend logs.");

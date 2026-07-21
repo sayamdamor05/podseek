@@ -35,13 +35,21 @@ function WatchWorkspace() {
   // Extract YouTube video ID from URL
   function extractVideoId(url: string): string | null {
     const match = url.match(/^.*(youtu\.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/);
-    return match && match[2].length === 11 ? match[2] : null;
+    return match && match[2] && match[2].length >= 8 && match[2].length <= 16 ? match[2] : null;
   }
 
   const videoId = extractVideoId(videoUrl);
   const isMediaReady = iframeLoaded && processingStatus === 'completed';
 
   useEffect(() => {
+    // Reset previous search results, query, and player seek state when a new video is loaded
+    setResults([]);
+    setQuery('');
+    setSeekSeconds(null);
+    setError('');
+    setProcessingStatus('idle');
+    setProcessingProgress(12);
+
     let cancelled = false;
     let intervalId: any = null;
 
@@ -170,6 +178,17 @@ function WatchWorkspace() {
 
     setIsIngesting(true);
     try {
+      let fetchedTitle = 'Analyzed Media';
+      try {
+        const titleRes = await fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(newUrl)}&format=json`);
+        if (titleRes.ok) {
+          const titleData = await titleRes.json();
+          if (titleData.title) fetchedTitle = titleData.title;
+        }
+      } catch {
+        // oEmbed fallback
+      }
+
       const res = await fetch(`${API_BASE}/api/ingest`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -179,10 +198,11 @@ function WatchWorkspace() {
 
       if (data.mediaId) {
         const safeUrl = encodeURIComponent(newUrl);
-        router.push(`/watch?id=${data.mediaId}&url=${safeUrl}&title=Analyzed%20Media`);
+        const safeTitle = encodeURIComponent(fetchedTitle);
+        router.push(`/watch?id=${data.mediaId}&url=${safeUrl}&title=${safeTitle}`);
         setNewUrl('');
       } else {
-        setError('Failed to start processing. Check backend logs.');
+        setError(data.error || 'Failed to start processing. Check backend logs.');
       }
     } catch {
       setError('Server connection failed. Is your backend running?');
