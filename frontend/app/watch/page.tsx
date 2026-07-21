@@ -10,6 +10,8 @@ interface SearchResult {
   score: number;
 }
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+
 function WatchWorkspace() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -41,9 +43,7 @@ function WatchWorkspace() {
 
   useEffect(() => {
     let cancelled = false;
-    let intervalId: ReturnType<typeof setInterval> | null = null;
-
-    const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+    let intervalId: any = null;
 
     const pollProcessingStatus = async () => {
       try {
