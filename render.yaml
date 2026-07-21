@@ -5,6 +5,7 @@ services:
     rootDir: backend
     buildCommand: npm install
     startCommand: npm start
+    healthCheckPath: /
     envVars:
       - key: GEMINI_API_KEY
         sync: false

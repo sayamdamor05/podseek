@@ -13,13 +13,20 @@ app.use(cors({
   origin: process.env.FRONTEND_URL || '*',
 }));
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-const pool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL?.includes('localhost') ? false : { rejectUnauthorized: false }
-});
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
+const pool = process.env.DATABASE_URL
+  ? new pg.Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.DATABASE_URL?.includes('localhost') ? false : { rejectUnauthorized: false }
+    })
+  : null;
 
 async function initDb() {
+  if (!pool) {
+    console.warn('⚠️ DATABASE_URL is not configured. Database features will remain inactive until set.');
+    return;
+  }
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS media_files (
       id SERIAL PRIMARY KEY,
@@ -270,6 +277,7 @@ ${formattedInputText}`,
 
 app.get('/api/media-status', async (req, res) => {
   try {
+    if (!pool) return res.status(503).json({ error: 'Database connection not configured' });
     const mediaIdParam = req.query.mediaId;
     const mediaId = Array.isArray(mediaIdParam) ? mediaIdParam[0] : mediaIdParam;
 
@@ -291,6 +299,7 @@ app.get('/api/media-status', async (req, res) => {
 
 app.post('/api/ingest', async (req, res) => {
   try {
+    if (!pool) return res.status(503).json({ error: 'Database connection not configured' });
     const { videoUrl, comments, commentFeed } = req.body;
 
     const dbRes = await pool.query(
@@ -311,6 +320,7 @@ app.post('/api/ingest', async (req, res) => {
 
 app.post('/api/search', async (req, res) => {
   try {
+    if (!pool) return res.status(503).json({ error: 'Database connection not configured' });
     const { query, mediaId } = req.body;
 
     const mediaRes = await pool.query(
@@ -408,7 +418,8 @@ app.get('/', (req, res) => res.send('API Alive!'));
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`🚀 PodSeek server running on port ${PORT}`));
 
-initDb().catch((error) => {
-  console.error('Database initialization failed:', error.message);
-  process.exit(1);
-});
+initDb()
+  .then(() => console.log('✅ Database initialized successfully'))
+  .catch((error) => {
+    console.warn('⚠️ Database initialization warning (server active for health checks):', error.message);
+  });

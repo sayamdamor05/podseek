@@ -2,7 +2,9 @@
   "name": "podseek",
   "private": true,
   "scripts": {
-    "dev": "concurrently -n backend,frontend -c blue,green \"node worker.js\" \"npm --prefix frontend run dev\""
+    "dev": "concurrently -n backend,frontend -c blue,green \"node worker.js\" \"npm --prefix frontend run dev\"",
+    "build": "npm --prefix frontend run build",
+    "start": "npm --prefix backend start"
   },
   "devDependencies": {
     "concurrently": "^9.0.6"
