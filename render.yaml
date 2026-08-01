@@ -1,7 +1,6 @@
 databases:
   - name: podseek-db
     databaseName: podseek
-    user: postgres
     plan: free
 
 services:
