@@ -1,3 +1,9 @@
+databases:
+  - name: podseek-db
+    databaseName: podseek
+    user: postgres
+    plan: free
+
 services:
   - type: web
     name: podseek-backend
@@ -10,6 +16,8 @@ services:
       - key: GEMINI_API_KEY
         sync: false
       - key: DATABASE_URL
-        sync: false
+        fromDatabase:
+          name: podseek-db
+          property: connectionString
       - key: FRONTEND_URL
         sync: false
