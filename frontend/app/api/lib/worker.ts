@@ -122,6 +122,19 @@ async function fetchNativeTranscript(videoId: string): Promise<any[]> {
     .filter((item: any) => item.text.length > 0);
 }
 
+async function fetchVideoTitle(videoUrl: string): Promise<string> {
+  try {
+    const res = await fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(videoUrl)}&format=json`);
+    if (res.ok) {
+      const data = await res.json();
+      return data.title || 'Untitled Video';
+    }
+  } catch (e) {
+    console.warn('⚠️ oEmbed fetch failed:', e);
+  }
+  return 'Untitled Video';
+}
+
 export async function processAudioJob(mediaId: number | string, videoUrl: string, options: any = {}): Promise<void> {
   try {
     const videoId = extractVideoId(videoUrl);
@@ -216,14 +229,64 @@ ${formattedInputText}`,
           }
         }
       } else {
-        // High-availability Fallback: Create 5 structured video topic segments
-        segments = [
-          { start: 0, end: 45, text: "Video introduction and overview of core concepts." },
-          { start: 45, end: 120, text: "Key techniques, common beginner mistakes, and fundamentals." },
-          { start: 120, end: 240, text: "In-depth practice steps, finger positioning, and exercises." },
-          { start: 240, end: 360, text: "Advanced insights, chord transitions, and common pitfalls." },
-          { start: 360, end: 500, text: "Summary recommendations and conclusion." }
-        ];
+        // High-availability Fallback: If transcript fetching is blocked by YouTube Cloud IP restrictions,
+        // use the video title via oEmbed and ask Gemini to generate highly relevant segments.
+        let fallbackSegments = null;
+        if (process.env.GEMINI_API_KEY) {
+          try {
+            const videoTitle = await fetchVideoTitle(videoUrl);
+            console.log(`🤖 Transcript blocked by YouTube. Prompting Gemini to generate custom segments based on video title: "${videoTitle}"`);
+
+            const response = await ai.models.generateContent({
+              model: 'gemini-2.5-flash',
+              contents: [
+                {
+                  text: `The automated transcript fetch for the YouTube video titled "${videoTitle}" failed due to server IP blocks.
+Please generate exactly 5 logical, sequential topic segments for this video.
+Estimate realistic start and end timestamps in seconds (assume the video is about 10 minutes long, meaning 0 to 600 seconds, and split it into 5 parts).
+Summarize what each segment covers in 1-3 sentences based on the title.
+Return a JSON array only.`,
+                },
+              ],
+              config: {
+                systemInstruction:
+                  'Return ONLY a valid JSON array. Each item must have "start" (number, seconds), "end" (number, seconds), and "text" (string summarizing the segment content in 1-3 sentences). No markdown, no explanation.',
+                responseMimeType: 'application/json',
+                responseSchema: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      start: { type: Type.NUMBER },
+                      end: { type: Type.NUMBER },
+                      text: { type: Type.STRING },
+                    },
+                    required: ['start', 'end', 'text'],
+                  },
+                },
+              },
+            });
+
+            if (response.text) {
+              fallbackSegments = JSON.parse(response.text);
+            }
+          } catch (e: any) {
+            console.warn('⚠️ Gemini fallback segmentation failed:', e.message);
+          }
+        }
+
+        if (fallbackSegments && fallbackSegments.length > 0) {
+          segments = fallbackSegments;
+        } else {
+          // Absolute fallback if Gemini fails as well
+          segments = [
+            { start: 0, end: 45, text: "Video introduction and overview of core concepts." },
+            { start: 45, end: 120, text: "Key techniques, common beginner mistakes, and fundamentals." },
+            { start: 120, end: 240, text: "In-depth practice steps, finger positioning, and exercises." },
+            { start: 240, end: 360, text: "Advanced insights, chord transitions, and common pitfalls." },
+            { start: 360, end: 500, text: "Summary recommendations and conclusion." }
+          ];
+        }
       }
     }
 
