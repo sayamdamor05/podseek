@@ -58,9 +58,9 @@ export async function POST(request: Request) {
         const keywordScore = computeKeywordMatch(query, row.text);
         const score = Math.max(semanticScore, semanticScore * 0.75 + keywordScore * 0.25, keywordScore);
 
-        const start = Number(row.start_time) || 0;
-        const end = Number(row.end_time) || 0;
-        const ts = start > 0 ? start : end > 0 ? end : null;
+        const start = row.start_time !== undefined && row.start_time !== null ? Number(row.start_time) : null;
+        const end = row.end_time !== undefined && row.end_time !== null ? Number(row.end_time) : null;
+        const ts = start !== null ? start : end !== null ? end : 0;
 
         return {
           id: row.id,
