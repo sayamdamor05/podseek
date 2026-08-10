@@ -58,14 +58,47 @@ export async function POST(request: Request) {
         const keywordScore = computeKeywordMatch(query, row.text);
         const score = Math.max(semanticScore, semanticScore * 0.75 + keywordScore * 0.25, keywordScore);
 
-        const start = row.start_time !== undefined && row.start_time !== null ? Number(row.start_time) : null;
-        const end = row.end_time !== undefined && row.end_time !== null ? Number(row.end_time) : null;
-        const ts = start !== null ? start : end !== null ? end : 0;
+        const rangeStart = row.start_time !== undefined && row.start_time !== null ? Number(row.start_time) : 0;
+        const rangeEnd = row.end_time !== undefined && row.end_time !== null ? Number(row.end_time) : 0;
+
+        let sentencesArr: any[] = [];
+        if (row.sentences) {
+          try {
+            sentencesArr = typeof row.sentences === 'string' ? JSON.parse(row.sentences) : row.sentences;
+          } catch {
+            sentencesArr = [];
+          }
+        }
+
+        let bestTimestamp = rangeStart;
+        let snippet = row.text;
+
+        if (Array.isArray(sentencesArr) && sentencesArr.length > 0) {
+          let maxSentenceScore = -1;
+          let bestIdx = 0;
+
+          sentencesArr.forEach((s: any, idx: number) => {
+            const sKw = computeKeywordMatch(query, s.text || '');
+            const sScore = Math.max(sKw, semanticScore * 0.7 + sKw * 0.3);
+            if (sScore > maxSentenceScore) {
+              maxSentenceScore = sScore;
+              bestIdx = idx;
+            }
+          });
+
+          bestTimestamp = sentencesArr[bestIdx].start ?? rangeStart;
+          const contextStart = Math.max(0, bestIdx - 1);
+          const contextEnd = Math.min(sentencesArr.length, bestIdx + 2);
+          snippet = sentencesArr.slice(contextStart, contextEnd).map((s: any) => s.text).join(' ');
+        }
 
         return {
           id: row.id,
           text: row.text,
-          timestamp: ts,
+          timestamp: bestTimestamp,
+          rangeStart,
+          rangeEnd,
+          snippet,
           score,
           semanticScore,
           keywordScore,
@@ -73,21 +106,33 @@ export async function POST(request: Request) {
       })
       .sort((a: any, b: any) => b.score - a.score);
 
-    const threshold = 0.05;
+    // Relative Score Thresholding (keep results within 30% of top score)
+    const topScore = scoredResults.length > 0 ? Math.max(...scoredResults.map((r: any) => r.score)) : 0;
+    const relativeThreshold = topScore > 0 ? topScore * 0.7 : 0;
 
-    const withTimestamps = scoredResults.filter((r: any) => r.timestamp && r.timestamp > 0);
-    const candidatePool = withTimestamps.length > 0 ? withTimestamps : scoredResults;
+    let candidatePool = scoredResults.filter((row: any) => row.score >= relativeThreshold && row.score > 0);
 
-    let results = candidatePool.filter((row: any) => row.score >= threshold).slice(0, 7);
-
-    if (results.length === 0) {
-      results = candidatePool
+    if (candidatePool.length === 0) {
+      candidatePool = [...scoredResults]
         .sort((a: any, b: any) => {
           if (b.keywordScore !== a.keywordScore) return b.keywordScore - a.keywordScore;
-          return b.semanticScore - a.semanticScore;
+          return b.score - a.score;
         })
         .slice(0, 5);
     }
+
+    // Deduplicate adjacent results within 10 seconds of a higher-scoring result
+    const deduplicated: any[] = [];
+    for (const candidate of candidatePool) {
+      const isDuplicate = deduplicated.some(
+        (accepted) => Math.abs(accepted.timestamp - candidate.timestamp) < 10
+      );
+      if (!isDuplicate) {
+        deduplicated.push(candidate);
+      }
+    }
+
+    const results = deduplicated.slice(0, 7);
 
     return NextResponse.json({ results });
   } catch (error: any) {

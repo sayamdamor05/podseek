@@ -8,6 +8,9 @@ interface SearchResult {
   text: string;
   timestamp: number;
   score: number;
+  rangeStart?: number;
+  rangeEnd?: number;
+  snippet?: string;
 }
 
 const API_BASE = '';
@@ -370,10 +373,15 @@ function WatchWorkspace() {
                 </span>
               </div>
 
-              {/* Segment text */}
-              <p className="text-sm text-slate-600 leading-relaxed line-clamp-3 group-hover:text-slate-900 transition">
-                {result.text}
+              {/* Segment text / snippet */}
+              <p className="text-sm text-slate-700 font-medium leading-relaxed line-clamp-3 group-hover:text-slate-950 transition">
+                {result.snippet || result.text}
               </p>
+              {result.rangeStart !== undefined && result.rangeEnd !== undefined && (
+                <div className="mt-2 text-[11px] text-slate-400">
+                  Topic Range: {formatTime(result.rangeStart)} – {formatTime(result.rangeEnd)}
+                </div>
+              )}
             </button>
           ))}
 

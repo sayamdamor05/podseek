@@ -135,6 +135,154 @@ async function fetchVideoTitle(videoUrl: string): Promise<string> {
   return 'Untitled Video';
 }
 
+export interface Sentence {
+  start: number;
+  end: number;
+  text: string;
+}
+
+export function mergeCaptionsIntoSentences(rawTranscript: Array<{ start: number; text: string }>): Sentence[] {
+  if (!rawTranscript || rawTranscript.length === 0) return [];
+
+  const sentences: Sentence[] = [];
+  let currentTexts: string[] = [];
+  let currentStart = rawTranscript[0].start;
+  let currentEnd = rawTranscript[0].start + 2;
+
+  for (let i = 0; i < rawTranscript.length; i++) {
+    const item = rawTranscript[i];
+    const text = item.text.trim();
+    if (!text) continue;
+
+    if (currentTexts.length === 0) {
+      currentStart = item.start;
+    }
+
+    currentTexts.push(text);
+    const estimatedDuration = Math.max(1, text.length * 0.06);
+    currentEnd = item.start + estimatedDuration;
+
+    const nextItem = rawTranscript[i + 1];
+    const pauseGap = nextItem ? nextItem.start - item.start : 999;
+    const isTerminalPunctuation = /[.?!]$/.test(text);
+    const isLongPause = pauseGap > 1.5;
+    const isTooLong = currentTexts.join(' ').length > 250;
+
+    if (isTerminalPunctuation || isLongPause || isTooLong || !nextItem) {
+      const fullText = currentTexts.join(' ').replace(/\s+/g, ' ').trim();
+      if (fullText.length > 0) {
+        sentences.push({
+          start: Math.round(currentStart * 10) / 10,
+          end: Math.round(currentEnd * 10) / 10,
+          text: fullText,
+        });
+      }
+      currentTexts = [];
+    }
+  }
+
+  return sentences;
+}
+
+export async function batchEmbedContents(texts: string[], aiClient: any, concurrency = 5): Promise<(number[] | null)[]> {
+  if (!texts || texts.length === 0 || !process.env.GEMINI_API_KEY) {
+    return texts ? texts.map(() => null) : [];
+  }
+
+  const results: (number[] | null)[] = new Array(texts.length).fill(null);
+
+  for (let i = 0; i < texts.length; i += concurrency) {
+    const chunk = texts.slice(i, i + concurrency);
+    const chunkPromises = chunk.map(async (text, chunkIdx) => {
+      const globalIdx = i + chunkIdx;
+      if (!text || !text.trim()) return;
+      try {
+        const response = await aiClient.models.embedContent({
+          model: 'gemini-embedding-2',
+          contents: text,
+        });
+        const vector = response.embeddings?.[0]?.values || response.embedding?.values || null;
+        results[globalIdx] = vector;
+      } catch (e: any) {
+        console.warn(`⚠️ Embedding failed for item ${globalIdx}:`, e.message);
+      }
+    });
+
+    await Promise.all(chunkPromises);
+  }
+
+  return results;
+}
+
+export function adaptiveSegmentation(sentences: Sentence[], sentenceEmbeddings: (number[] | null)[]): any[] | null {
+  if (sentences.length === 0) return null;
+  if (sentences.length === 1) {
+    return [{
+      start: sentences[0].start,
+      end: sentences[0].end,
+      text: sentences[0].text,
+      sentences: sentences,
+    }];
+  }
+
+  const sims: number[] = [];
+  for (let i = 0; i < sentences.length - 1; i++) {
+    const embA = sentenceEmbeddings[i];
+    const embB = sentenceEmbeddings[i + 1];
+    if (embA && embB) {
+      sims.push(cosineSimilarity(embA, embB));
+    } else {
+      sims.push(0.5);
+    }
+  }
+
+  const mean = sims.reduce((acc, val) => acc + val, 0) / sims.length;
+  const variance = sims.reduce((acc, val) => acc + Math.pow(val - mean, 2), 0) / sims.length;
+  const stdDev = Math.sqrt(variance);
+
+  const cutoff = mean - 1.0 * stdDev;
+  console.log(`📊 Adaptive Segmentation stats: Mean=${mean.toFixed(3)}, StdDev=${stdDev.toFixed(3)}, Cutoff=${cutoff.toFixed(3)}`);
+
+  const segments: any[] = [];
+  let currentGroup: Sentence[] = [sentences[0]];
+  let currentStart = sentences[0].start;
+
+  for (let i = 0; i < sentences.length - 1; i++) {
+    const sim = sims[i];
+    const nextSentence = sentences[i + 1];
+    const duration = nextSentence.end - currentStart;
+
+    const isBoundaryDrop = sim < cutoff && duration >= 20;
+    const isMaxDuration = duration >= 120;
+
+    if (isBoundaryDrop || isMaxDuration) {
+      const segText = currentGroup.map((s) => s.text).join(' ');
+      segments.push({
+        start: currentStart,
+        end: sentences[i].end,
+        text: segText,
+        sentences: [...currentGroup],
+      });
+      currentGroup = [nextSentence];
+      currentStart = nextSentence.start;
+    } else {
+      currentGroup.push(nextSentence);
+    }
+  }
+
+  if (currentGroup.length > 0) {
+    const segText = currentGroup.map((s) => s.text).join(' ');
+    segments.push({
+      start: currentStart,
+      end: currentGroup[currentGroup.length - 1].end,
+      text: segText,
+      sentences: [...currentGroup],
+    });
+  }
+
+  return segments.length > 0 ? segments : null;
+}
+
 export async function processAudioJob(mediaId: number | string, videoUrl: string, options: any = {}): Promise<void> {
   try {
     const videoId = extractVideoId(videoUrl);
@@ -150,34 +298,58 @@ export async function processAudioJob(mediaId: number | string, videoUrl: string
         start: item.start,
         end: item.end,
         text: item.text,
+        sentences: [{ start: item.start, end: item.end, text: item.text }],
       }));
     } else {
       console.log(`📡 Fetching captions for Video ID: ${videoId}...`);
-      let rawTranscript = null;
-      try {
-        rawTranscript = await fetchNativeTranscript(videoId);
-        console.log(`✅ Got ${rawTranscript.length} caption lines.`);
-      } catch (e: any) {
-        console.warn(`⚠️ Native transcript fetch warning (${e.message}). Using high-availability topic breakdown.`);
+      const rawTranscript = await fetchNativeTranscript(videoId);
+      console.log(`✅ Got ${rawTranscript.length} caption lines.`);
+
+      if (!rawTranscript || rawTranscript.length === 0) {
+        throw new Error('Transcript returned empty. Video may not have captions.');
       }
 
-      if (rawTranscript && rawTranscript.length > 0) {
+      // Step 1: Sentence-level precision merging
+      const sentences = mergeCaptionsIntoSentences(rawTranscript);
+      console.log(`📝 Merged ${rawTranscript.length} caption fragments into ${sentences.length} complete sentences.`);
+
+      // Step 2: Adaptive segmentation via sentence embeddings
+      if (process.env.GEMINI_API_KEY && sentences.length > 0) {
+        try {
+          console.log(`🧠 Computing embeddings for ${sentences.length} sentences...`);
+          const sentenceEmbeddings = await batchEmbedContents(
+            sentences.map((s) => s.text),
+            ai,
+            5
+          );
+
+          const adaptiveSegs = adaptiveSegmentation(sentences, sentenceEmbeddings);
+          if (adaptiveSegs && adaptiveSegs.length > 0) {
+            segments = adaptiveSegs;
+            console.log(`✅ Adaptive segmentation produced ${segments.length} topic segments based on embedding similarity boundaries.`);
+          }
+        } catch (e: any) {
+          console.warn('⚠️ Adaptive segmentation failed:', e.message);
+        }
+      }
+
+      // Gemini Fallback segmentation if adaptive segmentation didn't run or returned empty
+      if ((!segments || segments.length === 0) && sentences.length > 0) {
         if (process.env.GEMINI_API_KEY) {
           try {
-            const formattedInputText = rawTranscript
-              .map((item: any) => `[${Math.round(item.start)}s] ${item.text}`)
+            const formattedInputText = sentences
+              .map((item) => `[${Math.round(item.start)}s] ${item.text}`)
               .join('\n');
 
-            console.log(`🤖 Passing ${rawTranscript.length} lines to Gemini...`);
+            console.log(`🤖 Passing ${sentences.length} sentences to Gemini for topic segmentation...`);
 
             const response = await ai.models.generateContent({
               model: 'gemini-2.5-flash',
               contents: [
                 {
-                  text: `You are given a raw video transcript with timestamps in seconds.
-Group consecutive lines into logical topic segments (aim for 30–90 second chunks).
-Each segment should cover one clear idea or topic.
-Return a JSON array only — no explanation, no markdown.
+                  text: `You are given a video transcript split into complete sentences with timestamps in seconds.
+Group consecutive sentences into logical topic segments. Each segment should cover one clear idea or topic.
+Return a JSON array only.
 
 Transcript:
 ${formattedInputText}`,
@@ -203,131 +375,61 @@ ${formattedInputText}`,
             });
 
             if (response.text) {
-              segments = JSON.parse(response.text);
+              const geminiSegs = JSON.parse(response.text);
+              segments = geminiSegs.map((seg: any) => ({
+                ...seg,
+                sentences: sentences.filter((s) => s.start >= seg.start - 2 && s.start <= seg.end + 2),
+              }));
             }
           } catch (e: any) {
-            console.warn('⚠️ Gemini segmentation failed, using chunking fallback:', e.message);
+            console.warn('⚠️ Gemini segmentation failed, using sentence chunking fallback:', e.message);
           }
         }
 
         if (!segments || segments.length === 0) {
-          // Fallback segmenter: Chunk every 5 lines (~45 seconds)
-          let currentChunk: string[] = [];
-          let startTime = rawTranscript[0]?.start || 0;
-          for (let i = 0; i < rawTranscript.length; i++) {
-            currentChunk.push(rawTranscript[i].text);
-            if (currentChunk.length >= 5 || i === rawTranscript.length - 1) {
-              const endTime = rawTranscript[i]?.start || startTime + 45;
-              segments.push({
-                start: startTime,
-                end: endTime,
-                text: currentChunk.join(' '),
-              });
-              currentChunk = [];
-              startTime = endTime;
-            }
-          }
-        }
-      } else {
-        // High-availability Fallback: If transcript fetching is blocked by YouTube Cloud IP restrictions,
-        // use the video title via oEmbed and ask Gemini to generate highly relevant segments.
-        let fallbackSegments = null;
-        if (process.env.GEMINI_API_KEY) {
-          try {
-            const videoTitle = await fetchVideoTitle(videoUrl);
-            console.log(`🤖 Transcript blocked by YouTube. Prompting Gemini to generate custom segments based on video title: "${videoTitle}"`);
-
-            const response = await ai.models.generateContent({
-              model: 'gemini-2.5-flash',
-              contents: [
-                {
-                  text: `The automated transcript fetch for the YouTube video titled "${videoTitle}" failed due to server IP blocks.
-Please generate exactly 5 logical, sequential topic segments for this video.
-Estimate realistic start and end timestamps in seconds (assume the video is about 10 minutes long, meaning 0 to 600 seconds, and split it into 5 parts).
-Summarize what each segment covers in 1-3 sentences based on the title.
-Return a JSON array only.`,
-                },
-              ],
-              config: {
-                systemInstruction:
-                  'Return ONLY a valid JSON array. Each item must have "start" (number, seconds), "end" (number, seconds), and "text" (string summarizing the segment content in 1-3 sentences). No markdown, no explanation.',
-                responseMimeType: 'application/json',
-                responseSchema: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      start: { type: Type.NUMBER },
-                      end: { type: Type.NUMBER },
-                      text: { type: Type.STRING },
-                    },
-                    required: ['start', 'end', 'text'],
-                  },
-                },
-              },
+          // Fallback sentence chunker: 6 sentences per segment
+          const chunkSize = 6;
+          for (let i = 0; i < sentences.length; i += chunkSize) {
+            const group = sentences.slice(i, i + chunkSize);
+            segments.push({
+              start: group[0].start,
+              end: group[group.length - 1].end,
+              text: group.map((s) => s.text).join(' '),
+              sentences: group,
             });
-
-            if (response.text) {
-              fallbackSegments = JSON.parse(response.text);
-            }
-          } catch (e: any) {
-            console.warn('⚠️ Gemini fallback segmentation failed:', e.message);
           }
-        }
-
-        if (fallbackSegments && fallbackSegments.length > 0) {
-          segments = fallbackSegments;
-        } else {
-          // Absolute fallback if Gemini fails as well
-          segments = [
-            { start: 0, end: 45, text: "Video introduction and overview of core concepts." },
-            { start: 45, end: 120, text: "Key techniques, common beginner mistakes, and fundamentals." },
-            { start: 120, end: 240, text: "In-depth practice steps, finger positioning, and exercises." },
-            { start: 240, end: 360, text: "Advanced insights, chord transitions, and common pitfalls." },
-            { start: 360, end: 500, text: "Summary recommendations and conclusion." }
-          ];
         }
       }
     }
 
     if (!segments || segments.length === 0) {
-      throw new Error('No segments available to embed. Aborting.');
+      throw new Error('No valid transcript segments could be processed.');
     }
 
     console.log(`✨ Prepared ${segments.length} segments. Fetching batch embeddings...`);
 
-    // Extract non-empty text strings to embed
     const textsToEmbed = segments.map((s: any) => s.text?.trim()).filter(Boolean);
-    let vectors: number[][] = [];
+    let vectors: (number[] | null)[] = [];
 
     if (process.env.GEMINI_API_KEY && textsToEmbed.length > 0) {
-      try {
-        const embeddingResponse = await ai.models.embedContent({
-          model: 'gemini-embedding-2',
-          contents: textsToEmbed,
-        });
-
-        const rawEmbeddings = embeddingResponse.embeddings || [];
-        vectors = rawEmbeddings.map((emb: any) => emb.values || []);
-        console.log(`✅ Successfully generated batch embeddings for ${vectors.length} segments.`);
-      } catch (e: any) {
-        console.warn('⚠️ Gemini batch embedding failed:', e.message);
-      }
+      vectors = await batchEmbedContents(textsToEmbed, ai, 5);
+      console.log(`✅ Successfully generated batch embeddings for ${vectors.filter(Boolean).length}/${textsToEmbed.length} segments.`);
     }
 
-    let vectorIndex = 0;
-    for (const segment of segments) {
+    for (let i = 0; i < segments.length; i++) {
+      const segment = segments[i];
       if (!segment?.text?.trim()) continue;
 
-      const vector = vectors[vectorIndex] || [];
-      vectorIndex++;
+      const vector = vectors[i] || [];
+      const sentencesJson = segment.sentences ? JSON.stringify(segment.sentences) : null;
 
       await dbInsertSegment(
         mediaId,
         segment.start ?? 0,
         segment.end ?? 0,
         segment.text,
-        vector.length > 0 ? JSON.stringify(vector) : '[]'
+        vector && vector.length > 0 ? JSON.stringify(vector) : '[]',
+        sentencesJson
       );
     }
 

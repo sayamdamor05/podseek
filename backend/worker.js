@@ -42,8 +42,36 @@ async function ensureDbInit() {
   }
 }
 
+async function dbFindCompletedMediaByUrl(videoUrl) {
+  await ensureDbInit();
+  if (pool) {
+    try {
+      const dbRes = await pool.query(
+        "SELECT id FROM media_files WHERE url = $1 AND status = 'completed' ORDER BY id DESC LIMIT 1",
+        [videoUrl]
+      );
+      if (dbRes.rows.length > 0) return dbRes.rows[0].id;
+    } catch (e) {
+      console.warn('⚠️ PostgreSQL cache lookup failed:', e.message);
+    }
+  }
+
+  for (const media of memoryDb.mediaFiles.values()) {
+    if (media.url === videoUrl && media.status === 'completed') {
+      return media.id;
+    }
+  }
+  return null;
+}
+
 async function dbInsertMediaFile(videoUrl) {
   await ensureDbInit();
+  const cachedId = await dbFindCompletedMediaByUrl(videoUrl);
+  if (cachedId) {
+    console.log(`⚡ Reusing cached completed media file ID: ${cachedId} for URL: ${videoUrl}`);
+    return cachedId;
+  }
+
   if (pool) {
     try {
       const dbRes = await pool.query(
@@ -63,7 +91,7 @@ async function dbInsertMediaFile(videoUrl) {
 async function dbUpdateMediaStatus(mediaId, status) {
   if (pool) {
     try {
-      await pool.query("UPDATE media_files SET status = $1 WHERE id = $2", [status, mediaId]);
+      await pool.query("UPDATE media_files SET status = $1 WHERE id = $2", [status, Number(mediaId)]);
       return;
     } catch (e) {
       console.warn('⚠️ PostgreSQL status update failed:', e.message);
@@ -77,7 +105,7 @@ async function dbGetMediaStatus(mediaId) {
   await ensureDbInit();
   if (pool) {
     try {
-      const mediaRes = await pool.query('SELECT status FROM media_files WHERE id = $1', [mediaId]);
+      const mediaRes = await pool.query('SELECT status FROM media_files WHERE id = $1', [Number(mediaId)]);
       if (mediaRes.rows.length > 0) return mediaRes.rows[0].status;
     } catch (e) {
       console.warn('⚠️ PostgreSQL status lookup failed:', e.message);
@@ -87,13 +115,13 @@ async function dbGetMediaStatus(mediaId) {
   return record ? record.status : null;
 }
 
-async function dbInsertSegment(mediaId, start, end, text, embeddingJson) {
+async function dbInsertSegment(mediaId, start, end, text, embeddingJson, sentencesJson = null) {
   if (pool) {
     try {
       await pool.query(
-        `INSERT INTO transcript_segments (media_id, start_time, end_time, text, embedding)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [mediaId, start, end, text, embeddingJson]
+        `INSERT INTO transcript_segments (media_id, start_time, end_time, text, embedding, sentences)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [Number(mediaId), start, end, text, embeddingJson, sentencesJson]
       );
       return;
     } catch (e) {
@@ -107,6 +135,7 @@ async function dbInsertSegment(mediaId, start, end, text, embeddingJson) {
     end_time: end,
     text,
     embedding: embeddingJson,
+    sentences: sentencesJson,
   });
 }
 
@@ -114,10 +143,10 @@ async function dbGetSegments(mediaId) {
   if (pool) {
     try {
       const dbResult = await pool.query(
-        `SELECT id, text, start_time, end_time, embedding
+        `SELECT id, text, start_time, end_time, embedding, sentences
          FROM transcript_segments
          WHERE media_id = $1`,
-        [mediaId]
+        [Number(mediaId)]
       );
       if (dbResult.rows && dbResult.rows.length > 0) return dbResult.rows;
     } catch (e) {
@@ -149,8 +178,13 @@ async function initDb() {
       start_time REAL NOT NULL,
       end_time REAL NOT NULL,
       text TEXT NOT NULL,
-      embedding JSONB NOT NULL
+      embedding JSONB NOT NULL,
+      sentences JSONB
     )
+  `);
+
+  await pool.query(`
+    ALTER TABLE transcript_segments ADD COLUMN IF NOT EXISTS sentences JSONB;
   `);
   dbInitialized = true;
 }
@@ -243,7 +277,149 @@ function normalizeCommentFeed(commentFeed) {
     .filter(Boolean);
 }
 
-// Uses youtube-transcript package — the only reliable server-side method
+function mergeCaptionsIntoSentences(rawTranscript) {
+  if (!rawTranscript || rawTranscript.length === 0) return [];
+
+  const sentences = [];
+  let currentTexts = [];
+  let currentStart = rawTranscript[0].start;
+  let currentEnd = rawTranscript[0].start + 2;
+
+  for (let i = 0; i < rawTranscript.length; i++) {
+    const item = rawTranscript[i];
+    const text = item.text.trim();
+    if (!text) continue;
+
+    if (currentTexts.length === 0) {
+      currentStart = item.start;
+    }
+
+    currentTexts.push(text);
+    const estimatedDuration = Math.max(1, text.length * 0.06);
+    currentEnd = item.start + estimatedDuration;
+
+    const nextItem = rawTranscript[i + 1];
+    const pauseGap = nextItem ? nextItem.start - item.start : 999;
+    const isTerminalPunctuation = /[.?!]$/.test(text);
+    const isLongPause = pauseGap > 1.5;
+    const isTooLong = currentTexts.join(' ').length > 250;
+
+    if (isTerminalPunctuation || isLongPause || isTooLong || !nextItem) {
+      const fullText = currentTexts.join(' ').replace(/\s+/g, ' ').trim();
+      if (fullText.length > 0) {
+        sentences.push({
+          start: Math.round(currentStart * 10) / 10,
+          end: Math.round(currentEnd * 10) / 10,
+          text: fullText,
+        });
+      }
+      currentTexts = [];
+    }
+  }
+
+  return sentences;
+}
+
+async function batchEmbedContents(texts, aiClient, concurrency = 5) {
+  if (!texts || texts.length === 0 || !process.env.GEMINI_API_KEY) {
+    return texts ? texts.map(() => null) : [];
+  }
+
+  const results = new Array(texts.length).fill(null);
+
+  for (let i = 0; i < texts.length; i += concurrency) {
+    const chunk = texts.slice(i, i + concurrency);
+    const chunkPromises = chunk.map(async (text, chunkIdx) => {
+      const globalIdx = i + chunkIdx;
+      if (!text || !text.trim()) return;
+      try {
+        const response = await aiClient.models.embedContent({
+          model: 'gemini-embedding-2',
+          contents: text,
+        });
+        const vector = response.embeddings?.[0]?.values || response.embedding?.values || null;
+        results[globalIdx] = vector;
+      } catch (e) {
+        console.warn(`⚠️ Embedding failed for item ${globalIdx}:`, e.message);
+      }
+    });
+
+    await Promise.all(chunkPromises);
+  }
+
+  return results;
+}
+
+function adaptiveSegmentation(sentences, sentenceEmbeddings) {
+  if (sentences.length === 0) return null;
+  if (sentences.length === 1) {
+    return [{
+      start: sentences[0].start,
+      end: sentences[0].end,
+      text: sentences[0].text,
+      sentences: sentences,
+    }];
+  }
+
+  const sims = [];
+  for (let i = 0; i < sentences.length - 1; i++) {
+    const embA = sentenceEmbeddings[i];
+    const embB = sentenceEmbeddings[i + 1];
+    if (embA && embB) {
+      sims.push(cosineSimilarity(embA, embB));
+    } else {
+      sims.push(0.5);
+    }
+  }
+
+  const mean = sims.reduce((acc, val) => acc + val, 0) / sims.length;
+  const variance = sims.reduce((acc, val) => acc + Math.pow(val - mean, 2), 0) / sims.length;
+  const stdDev = Math.sqrt(variance);
+
+  const cutoff = mean - 1.0 * stdDev;
+  console.log(`📊 Adaptive Segmentation stats: Mean=${mean.toFixed(3)}, StdDev=${stdDev.toFixed(3)}, Cutoff=${cutoff.toFixed(3)}`);
+
+  const segments = [];
+  let currentGroup = [sentences[0]];
+  let currentStart = sentences[0].start;
+
+  for (let i = 0; i < sentences.length - 1; i++) {
+    const sim = sims[i];
+    const nextSentence = sentences[i + 1];
+    const duration = nextSentence.end - currentStart;
+
+    const isBoundaryDrop = sim < cutoff && duration >= 20;
+    const isMaxDuration = duration >= 120;
+
+    if (isBoundaryDrop || isMaxDuration) {
+      const segText = currentGroup.map((s) => s.text).join(' ');
+      segments.push({
+        start: currentStart,
+        end: sentences[i].end,
+        text: segText,
+        sentences: [...currentGroup],
+      });
+      currentGroup = [nextSentence];
+      currentStart = nextSentence.start;
+    } else {
+      currentGroup.push(nextSentence);
+    }
+  }
+
+  if (currentGroup.length > 0) {
+    const segText = currentGroup.map((s) => s.text).join(' ');
+    segments.push({
+      start: currentStart,
+      end: currentGroup[currentGroup.length - 1].end,
+      text: segText,
+      sentences: [...currentGroup],
+    });
+  }
+
+  return segments.length > 0 ? segments : null;
+}
+
+// Uses youtube-transcript package
 async function fetchNativeTranscript(videoId) {
   let YoutubeTranscript;
   try {
@@ -289,34 +465,58 @@ export async function processAudioJob(mediaId, videoUrl, options = {}) {
         start: item.start,
         end: item.end,
         text: item.text,
+        sentences: [{ start: item.start, end: item.end, text: item.text }],
       }));
     } else {
       console.log(`📡 Fetching captions for Video ID: ${videoId}...`);
-      let rawTranscript = null;
-      try {
-        rawTranscript = await fetchNativeTranscript(videoId);
-        console.log(`✅ Got ${rawTranscript.length} caption lines.`);
-      } catch (e) {
-        console.warn(`⚠️ Native transcript fetch warning (${e.message}). Using high-availability topic breakdown.`);
+      const rawTranscript = await fetchNativeTranscript(videoId);
+      console.log(`✅ Got ${rawTranscript.length} caption lines.`);
+
+      if (!rawTranscript || rawTranscript.length === 0) {
+        throw new Error('Transcript returned empty. Video may not have captions.');
       }
 
-      if (rawTranscript && rawTranscript.length > 0) {
+      // Sentence merging
+      const sentences = mergeCaptionsIntoSentences(rawTranscript);
+      console.log(`📝 Merged ${rawTranscript.length} caption fragments into ${sentences.length} complete sentences.`);
+
+      // Adaptive segmentation via sentence embeddings
+      if (process.env.GEMINI_API_KEY && sentences.length > 0) {
+        try {
+          console.log(`🧠 Computing embeddings for ${sentences.length} sentences...`);
+          const sentenceEmbeddings = await batchEmbedContents(
+            sentences.map((s) => s.text),
+            ai,
+            5
+          );
+
+          const adaptiveSegs = adaptiveSegmentation(sentences, sentenceEmbeddings);
+          if (adaptiveSegs && adaptiveSegs.length > 0) {
+            segments = adaptiveSegs;
+            console.log(`✅ Adaptive segmentation produced ${segments.length} topic segments based on embedding similarity boundaries.`);
+          }
+        } catch (e) {
+          console.warn('⚠️ Adaptive segmentation failed:', e.message);
+        }
+      }
+
+      // Gemini Fallback segmentation if adaptive segmentation didn't run or returned empty
+      if ((!segments || segments.length === 0) && sentences.length > 0) {
         if (process.env.GEMINI_API_KEY) {
           try {
-            const formattedInputText = rawTranscript
+            const formattedInputText = sentences
               .map((item) => `[${Math.round(item.start)}s] ${item.text}`)
               .join('\n');
 
-            console.log(`🤖 Passing ${rawTranscript.length} lines to Gemini...`);
+            console.log(`🤖 Passing ${sentences.length} sentences to Gemini for topic segmentation...`);
 
             const response = await ai.models.generateContent({
               model: 'gemini-2.5-flash',
               contents: [
                 {
-                  text: `You are given a raw video transcript with timestamps in seconds.
-Group consecutive lines into logical topic segments (aim for 30–90 second chunks).
-Each segment should cover one clear idea or topic.
-Return a JSON array only — no explanation, no markdown.
+                  text: `You are given a video transcript split into complete sentences with timestamps in seconds.
+Group consecutive sentences into logical topic segments. Each segment should cover one clear idea or topic.
+Return a JSON array only.
 
 Transcript:
 ${formattedInputText}`,
@@ -341,76 +541,62 @@ ${formattedInputText}`,
               },
             });
 
-            segments = JSON.parse(response.text);
+            if (response.text) {
+              const geminiSegs = JSON.parse(response.text);
+              segments = geminiSegs.map((seg) => ({
+                ...seg,
+                sentences: sentences.filter((s) => s.start >= seg.start - 2 && s.start <= seg.end + 2),
+              }));
+            }
           } catch (e) {
-            console.warn('⚠️ Gemini segmentation failed, using chunking fallback:', e.message);
+            console.warn('⚠️ Gemini segmentation failed, using sentence chunking fallback:', e.message);
           }
         }
 
         if (!segments || segments.length === 0) {
-          // Fallback segmenter: Chunk every 5 lines (~45 seconds)
-          let currentChunk = [];
-          let startTime = rawTranscript[0]?.start || 0;
-          for (let i = 0; i < rawTranscript.length; i++) {
-            currentChunk.push(rawTranscript[i].text);
-            if (currentChunk.length >= 5 || i === rawTranscript.length - 1) {
-              const endTime = rawTranscript[i]?.start || startTime + 45;
-              segments.push({
-                start: startTime,
-                end: endTime,
-                text: currentChunk.join(' '),
-              });
-              currentChunk = [];
-              startTime = endTime;
-            }
+          const chunkSize = 6;
+          for (let i = 0; i < sentences.length; i += chunkSize) {
+            const group = sentences.slice(i, i + chunkSize);
+            segments.push({
+              start: group[0].start,
+              end: group[group.length - 1].end,
+              text: group.map((s) => s.text).join(' '),
+              sentences: group,
+            });
           }
         }
-      } else {
-        // High-availability Fallback: Create 5 structured video topic segments
-        segments = [
-          { start: 0, end: 45, text: "Video introduction and overview of core concepts." },
-          { start: 45, end: 120, text: "Key techniques, common beginner mistakes, and fundamentals." },
-          { start: 120, end: 240, text: "In-depth practice steps, finger positioning, and exercises." },
-          { start: 240, end: 360, text: "Advanced insights, chord transitions, and common pitfalls." },
-          { start: 360, end: 500, text: "Summary recommendations and conclusion." }
-        ];
       }
     }
 
     if (!segments || segments.length === 0) {
-      throw new Error('No segments available to embed. Aborting.');
+      throw new Error('No valid transcript segments could be processed.');
     }
 
-    console.log(`✨ Prepared ${segments.length} segments. Storing embeddings...`);
+    console.log(`✨ Prepared ${segments.length} segments. Fetching batch embeddings...`);
 
-    for (const segment of segments) {
+    const textsToEmbed = segments.map((s) => s.text?.trim()).filter(Boolean);
+    let vectors = [];
+
+    if (process.env.GEMINI_API_KEY && textsToEmbed.length > 0) {
+      vectors = await batchEmbedContents(textsToEmbed, ai, 5);
+      console.log(`✅ Successfully generated batch embeddings for ${vectors.filter(Boolean).length}/${textsToEmbed.length} segments.`);
+    }
+
+    for (let i = 0; i < segments.length; i++) {
+      const segment = segments[i];
       if (!segment?.text?.trim()) continue;
 
-      let vector = null;
-      if (process.env.GEMINI_API_KEY) {
-        try {
-          const embeddingResponse = await ai.models.embedContent({
-            model: 'gemini-embedding-2',
-            contents: segment.text,
-          });
-
-          vector =
-            embeddingResponse.embeddings?.[0]?.values ||
-            embeddingResponse.embedding?.values;
-        } catch (e) {
-          console.warn('⚠️ Embedding warning:', e.message);
-        }
-      }
+      const vector = vectors[i] || [];
+      const sentencesJson = segment.sentences ? JSON.stringify(segment.sentences) : null;
 
       await dbInsertSegment(
         mediaId,
         segment.start ?? 0,
         segment.end ?? 0,
         segment.text,
-        vector ? JSON.stringify(vector) : '[]'
+        vector && vector.length > 0 ? JSON.stringify(vector) : '[]',
+        sentencesJson
       );
-
-      if (process.env.GEMINI_API_KEY) await delay(800);
     }
 
     await dbUpdateMediaStatus(mediaId, 'completed');
@@ -472,7 +658,7 @@ app.post('/api/search', async (req, res) => {
     }
 
     let queryVector = null;
-    if (process.env.GEMINI_API_KEY) {
+    if (process.env.GEMINI_API_KEY && query) {
       try {
         const embeddingResponse = await ai.models.embedContent({
           model: 'gemini-embedding-2',
@@ -506,14 +692,47 @@ app.post('/api/search', async (req, res) => {
         const keywordScore = computeKeywordMatch(query, row.text);
         const score = Math.max(semanticScore, semanticScore * 0.75 + keywordScore * 0.25, keywordScore);
 
-        const start = Number(row.start_time) || 0;
-        const end = Number(row.end_time) || 0;
-        const ts = start > 0 ? start : end > 0 ? end : null;
+        const rangeStart = row.start_time !== undefined && row.start_time !== null ? Number(row.start_time) : 0;
+        const rangeEnd = row.end_time !== undefined && row.end_time !== null ? Number(row.end_time) : 0;
+
+        let sentencesArr = [];
+        if (row.sentences) {
+          try {
+            sentencesArr = typeof row.sentences === 'string' ? JSON.parse(row.sentences) : row.sentences;
+          } catch {
+            sentencesArr = [];
+          }
+        }
+
+        let bestTimestamp = rangeStart;
+        let snippet = row.text;
+
+        if (Array.isArray(sentencesArr) && sentencesArr.length > 0) {
+          let maxSentenceScore = -1;
+          let bestIdx = 0;
+
+          sentencesArr.forEach((s, idx) => {
+            const sKw = computeKeywordMatch(query, s.text || '');
+            const sScore = Math.max(sKw, semanticScore * 0.7 + sKw * 0.3);
+            if (sScore > maxSentenceScore) {
+              maxSentenceScore = sScore;
+              bestIdx = idx;
+            }
+          });
+
+          bestTimestamp = sentencesArr[bestIdx].start ?? rangeStart;
+          const contextStart = Math.max(0, bestIdx - 1);
+          const contextEnd = Math.min(sentencesArr.length, bestIdx + 2);
+          snippet = sentencesArr.slice(contextStart, contextEnd).map((s) => s.text).join(' ');
+        }
 
         return {
           id: row.id,
           text: row.text,
-          timestamp: ts,
+          timestamp: bestTimestamp,
+          rangeStart,
+          rangeEnd,
+          snippet,
           score,
           semanticScore,
           keywordScore,
@@ -521,21 +740,33 @@ app.post('/api/search', async (req, res) => {
       })
       .sort((a, b) => b.score - a.score);
 
-    const threshold = 0.05;
+    // Relative Score Thresholding (keep results within 30% of top score)
+    const topScore = scoredResults.length > 0 ? Math.max(...scoredResults.map((r) => r.score)) : 0;
+    const relativeThreshold = topScore > 0 ? topScore * 0.7 : 0;
 
-    const withTimestamps = scoredResults.filter((r) => r.timestamp && r.timestamp > 0);
-    const candidatePool = withTimestamps.length > 0 ? withTimestamps : scoredResults;
+    let candidatePool = scoredResults.filter((row) => row.score >= relativeThreshold && row.score > 0);
 
-    let results = candidatePool.filter((row) => row.score >= threshold).slice(0, 7);
-
-    if (results.length === 0) {
-      results = candidatePool
+    if (candidatePool.length === 0) {
+      candidatePool = [...scoredResults]
         .sort((a, b) => {
           if (b.keywordScore !== a.keywordScore) return b.keywordScore - a.keywordScore;
-          return b.semanticScore - a.semanticScore;
+          return b.score - a.score;
         })
         .slice(0, 5);
     }
+
+    // Deduplicate adjacent results within 10 seconds of a higher-scoring result
+    const deduplicated = [];
+    for (const candidate of candidatePool) {
+      const isDuplicate = deduplicated.some(
+        (accepted) => Math.abs(accepted.timestamp - candidate.timestamp) < 10
+      );
+      if (!isDuplicate) {
+        deduplicated.push(candidate);
+      }
+    }
+
+    const results = deduplicated.slice(0, 7);
 
     res.json({ results });
   } catch (error) {

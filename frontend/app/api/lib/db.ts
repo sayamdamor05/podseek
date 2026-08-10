@@ -45,8 +45,13 @@ async function initDb() {
       start_time REAL NOT NULL,
       end_time REAL NOT NULL,
       text TEXT NOT NULL,
-      embedding JSONB NOT NULL
+      embedding JSONB NOT NULL,
+      sentences JSONB
     )
+  `);
+  // Ensure schema migration for existing tables
+  await pool.query(`
+    ALTER TABLE transcript_segments ADD COLUMN IF NOT EXISTS sentences JSONB;
   `);
   globalRef.dbInitialized = true;
 }
@@ -61,8 +66,36 @@ async function ensureDbInit() {
   }
 }
 
+export async function dbFindCompletedMediaByUrl(videoUrl: string): Promise<number | null> {
+  await ensureDbInit();
+  if (pool) {
+    try {
+      const dbRes = await pool.query(
+        "SELECT id FROM media_files WHERE url = $1 AND status = 'completed' ORDER BY id DESC LIMIT 1",
+        [videoUrl]
+      );
+      if (dbRes.rows.length > 0) return dbRes.rows[0].id;
+    } catch (e: any) {
+      console.warn('⚠️ PostgreSQL cache lookup failed:', e.message);
+    }
+  }
+
+  for (const media of memoryDb.mediaFiles.values()) {
+    if (media.url === videoUrl && media.status === 'completed') {
+      return media.id;
+    }
+  }
+  return null;
+}
+
 export async function dbInsertMediaFile(videoUrl: string): Promise<number> {
   await ensureDbInit();
+  const cachedId = await dbFindCompletedMediaByUrl(videoUrl);
+  if (cachedId) {
+    console.log(`⚡ Reusing cached completed media file ID: ${cachedId} for URL: ${videoUrl}`);
+    return cachedId;
+  }
+
   if (pool) {
     try {
       const dbRes = await pool.query(
@@ -111,14 +144,15 @@ export async function dbInsertSegment(
   start: number,
   end: number,
   text: string,
-  embeddingJson: string
+  embeddingJson: string,
+  sentencesJson?: string | null
 ): Promise<void> {
   if (pool) {
     try {
       await pool.query(
-        `INSERT INTO transcript_segments (media_id, start_time, end_time, text, embedding)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [Number(mediaId), start, end, text, embeddingJson]
+        `INSERT INTO transcript_segments (media_id, start_time, end_time, text, embedding, sentences)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [Number(mediaId), start, end, text, embeddingJson, sentencesJson || null]
       );
       return;
     } catch (e: any) {
@@ -132,6 +166,7 @@ export async function dbInsertSegment(
     end_time: end,
     text,
     embedding: embeddingJson,
+    sentences: sentencesJson,
   });
 }
 
@@ -139,7 +174,7 @@ export async function dbGetSegments(mediaId: number | string): Promise<any[]> {
   if (pool) {
     try {
       const dbResult = await pool.query(
-        `SELECT id, text, start_time, end_time, embedding
+        `SELECT id, text, start_time, end_time, embedding, sentences
          FROM transcript_segments
          WHERE media_id = $1`,
         [Number(mediaId)]
