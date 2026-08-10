@@ -685,7 +685,8 @@ app.post('/api/search', async (req, res) => {
       return res.json({ results: [] });
     }
 
-    const scoredResults = rows
+    // Step 1: Coarse segment-level scoring
+    const scoredSegments = rows
       .map((row) => {
         const embedding = parseEmbedding(row.embedding);
         const semanticScore = (queryVector && embedding) ? cosineSimilarity(queryVector, embedding) : 0;
@@ -695,44 +696,12 @@ app.post('/api/search', async (req, res) => {
         const rangeStart = row.start_time !== undefined && row.start_time !== null ? Number(row.start_time) : 0;
         const rangeEnd = row.end_time !== undefined && row.end_time !== null ? Number(row.end_time) : 0;
 
-        let sentencesArr = [];
-        if (row.sentences) {
-          try {
-            sentencesArr = typeof row.sentences === 'string' ? JSON.parse(row.sentences) : row.sentences;
-          } catch {
-            sentencesArr = [];
-          }
-        }
-
-        let bestTimestamp = rangeStart;
-        let snippet = row.text;
-
-        if (Array.isArray(sentencesArr) && sentencesArr.length > 0) {
-          let maxSentenceScore = -1;
-          let bestIdx = 0;
-
-          sentencesArr.forEach((s, idx) => {
-            const sKw = computeKeywordMatch(query, s.text || '');
-            const sScore = Math.max(sKw, semanticScore * 0.7 + sKw * 0.3);
-            if (sScore > maxSentenceScore) {
-              maxSentenceScore = sScore;
-              bestIdx = idx;
-            }
-          });
-
-          bestTimestamp = sentencesArr[bestIdx].start ?? rangeStart;
-          const contextStart = Math.max(0, bestIdx - 1);
-          const contextEnd = Math.min(sentencesArr.length, bestIdx + 2);
-          snippet = sentencesArr.slice(contextStart, contextEnd).map((s) => s.text).join(' ');
-        }
-
         return {
           id: row.id,
+          row,
           text: row.text,
-          timestamp: bestTimestamp,
           rangeStart,
           rangeEnd,
-          snippet,
           score,
           semanticScore,
           keywordScore,
@@ -740,14 +709,14 @@ app.post('/api/search', async (req, res) => {
       })
       .sort((a, b) => b.score - a.score);
 
-    // Relative Score Thresholding (keep results within 30% of top score)
-    const topScore = scoredResults.length > 0 ? Math.max(...scoredResults.map((r) => r.score)) : 0;
+    // Step 2: Relative Score Thresholding (keep segments within 30% of top score)
+    const topScore = scoredSegments.length > 0 ? Math.max(...scoredSegments.map((r) => r.score)) : 0;
     const relativeThreshold = topScore > 0 ? topScore * 0.7 : 0;
 
-    let candidatePool = scoredResults.filter((row) => row.score >= relativeThreshold && row.score > 0);
+    let topSegments = scoredSegments.filter((row) => row.score >= relativeThreshold && row.score > 0);
 
-    if (candidatePool.length === 0) {
-      candidatePool = [...scoredResults]
+    if (topSegments.length === 0) {
+      topSegments = [...scoredSegments]
         .sort((a, b) => {
           if (b.keywordScore !== a.keywordScore) return b.keywordScore - a.keywordScore;
           return b.score - a.score;
@@ -755,9 +724,81 @@ app.post('/api/search', async (req, res) => {
         .slice(0, 5);
     }
 
-    // Deduplicate adjacent results within 10 seconds of a higher-scoring result
+    // Step 3: On-the-fly sentence-level embedding re-ranking for top candidate segments only
+    const processedResults = await Promise.all(
+      topSegments.map(async (seg) => {
+        let sentencesArr = [];
+        if (seg.row.sentences) {
+          try {
+            sentencesArr = typeof seg.row.sentences === 'string' ? JSON.parse(seg.row.sentences) : seg.row.sentences;
+          } catch {
+            sentencesArr = [];
+          }
+        }
+
+        let bestTimestamp = seg.rangeStart;
+        let snippet = seg.text;
+        let bestScore = seg.score;
+        let bestSemanticScore = seg.semanticScore;
+        let bestKeywordScore = seg.keywordScore;
+
+        if (Array.isArray(sentencesArr) && sentencesArr.length > 0) {
+          let sentenceEmbeddings = [];
+          const sentenceTexts = sentencesArr.map((s) => s.text || '').filter(Boolean);
+
+          if (queryVector && sentenceTexts.length > 0 && process.env.GEMINI_API_KEY) {
+            try {
+              sentenceEmbeddings = await batchEmbedContents(sentenceTexts, ai, 5);
+            } catch (e) {
+              console.warn('⚠️ Sentence re-ranking embedding failed:', e.message);
+            }
+          }
+
+          let maxSentenceCombScore = -1;
+          let bestIdx = 0;
+
+          sentencesArr.forEach((s, idx) => {
+            const sentVector = sentenceEmbeddings[idx] || null;
+            const sSemScore = (queryVector && sentVector)
+              ? cosineSimilarity(queryVector, sentVector)
+              : seg.semanticScore;
+            const sKwScore = computeKeywordMatch(query, s.text || '');
+            const sCombScore = Math.max(sSemScore, sSemScore * 0.75 + sKwScore * 0.25, sKwScore);
+
+            if (sCombScore > maxSentenceCombScore) {
+              maxSentenceCombScore = sCombScore;
+              bestIdx = idx;
+              bestSemanticScore = sSemScore;
+              bestKeywordScore = sKwScore;
+              bestScore = Math.max(seg.score, sCombScore);
+            }
+          });
+
+          bestTimestamp = sentencesArr[bestIdx].start ?? seg.rangeStart;
+          const contextStart = Math.max(0, bestIdx - 1);
+          const contextEnd = Math.min(sentencesArr.length, bestIdx + 2);
+          snippet = sentencesArr.slice(contextStart, contextEnd).map((s) => s.text).join(' ');
+        }
+
+        return {
+          id: seg.id,
+          text: seg.text,
+          timestamp: bestTimestamp,
+          rangeStart: seg.rangeStart,
+          rangeEnd: seg.rangeEnd,
+          snippet,
+          score: bestScore,
+          semanticScore: bestSemanticScore,
+          keywordScore: bestKeywordScore,
+        };
+      })
+    );
+
+    processedResults.sort((a, b) => b.score - a.score);
+
+    // Step 4: Deduplicate adjacent results within 10 seconds of a higher-scoring result
     const deduplicated = [];
-    for (const candidate of candidatePool) {
+    for (const candidate of processedResults) {
       const isDuplicate = deduplicated.some(
         (accepted) => Math.abs(accepted.timestamp - candidate.timestamp) < 10
       );
