@@ -19,10 +19,12 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Missing mediaId' }, { status: 400 });
     }
 
-    const status = await dbGetMediaStatus(mediaId);
-    if (!status) {
+    const statusObj = await dbGetMediaStatus(mediaId);
+    if (!statusObj) {
       return NextResponse.json({ error: 'Media not found.' }, { status: 404 });
     }
+
+    const status = statusObj.status;
 
     let queryVector: number[] | null = null;
     if (process.env.GEMINI_API_KEY && query) {
@@ -47,7 +49,7 @@ export async function POST(request: Request) {
         return NextResponse.json({ results: [], processing: true });
       }
       if (status === 'failed') {
-        return NextResponse.json({ results: [], error: 'Media processing failed. Please retry.' });
+        return NextResponse.json({ results: [], error: statusObj.error || 'Media processing failed. Please retry.' });
       }
       return NextResponse.json({ results: [] });
     }

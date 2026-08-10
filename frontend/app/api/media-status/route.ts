@@ -10,12 +10,12 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: 'Missing mediaId' }, { status: 400 });
     }
 
-    const status = await dbGetMediaStatus(mediaId);
-    if (!status) {
+    const statusObj = await dbGetMediaStatus(mediaId);
+    if (!statusObj) {
       return NextResponse.json({ status: 'not_found' }, { status: 404 });
     }
 
-    return NextResponse.json({ status });
+    return NextResponse.json({ status: statusObj.status, error: statusObj.error || null });
   } catch (error: any) {
     console.error('Media status lookup error:', error.message);
     return NextResponse.json({ error: 'Failed to get media status' }, { status: 500 });

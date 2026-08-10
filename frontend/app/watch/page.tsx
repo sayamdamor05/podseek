@@ -88,6 +88,9 @@ function WatchWorkspace() {
           if (intervalId) clearInterval(intervalId);
         } else {
           setProcessingProgress(0);
+          if (data.error) {
+            setError(data.error);
+          }
           if (intervalId) clearInterval(intervalId);
         }
       } catch {

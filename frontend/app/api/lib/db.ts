@@ -53,6 +53,9 @@ async function initDb() {
   await pool.query(`
     ALTER TABLE transcript_segments ADD COLUMN IF NOT EXISTS sentences JSONB;
   `);
+  await pool.query(`
+    ALTER TABLE media_files ADD COLUMN IF NOT EXISTS error_message TEXT;
+  `);
   globalRef.dbInitialized = true;
 }
 
@@ -112,31 +115,36 @@ export async function dbInsertMediaFile(videoUrl: string): Promise<number> {
   return id;
 }
 
-export async function dbUpdateMediaStatus(mediaId: number | string, status: string): Promise<void> {
+export async function dbUpdateMediaStatus(mediaId: number | string, status: string, errorMessage?: string | null): Promise<void> {
   if (pool) {
     try {
-      await pool.query("UPDATE media_files SET status = $1 WHERE id = $2", [status, Number(mediaId)]);
+      await pool.query("UPDATE media_files SET status = $1, error_message = $2 WHERE id = $3", [status, errorMessage || null, Number(mediaId)]);
       return;
     } catch (e: any) {
       console.warn('⚠️ PostgreSQL status update failed:', e.message);
     }
   }
   const record = memoryDb.mediaFiles.get(Number(mediaId));
-  if (record) record.status = status;
+  if (record) {
+    record.status = status;
+    record.error_message = errorMessage || null;
+  }
 }
 
-export async function dbGetMediaStatus(mediaId: number | string): Promise<string | null> {
+export async function dbGetMediaStatus(mediaId: number | string): Promise<{ status: string; error?: string | null } | null> {
   await ensureDbInit();
   if (pool) {
     try {
-      const mediaRes = await pool.query('SELECT status FROM media_files WHERE id = $1', [Number(mediaId)]);
-      if (mediaRes.rows.length > 0) return mediaRes.rows[0].status;
+      const mediaRes = await pool.query('SELECT status, error_message FROM media_files WHERE id = $1', [Number(mediaId)]);
+      if (mediaRes.rows.length > 0) {
+        return { status: mediaRes.rows[0].status, error: mediaRes.rows[0].error_message };
+      }
     } catch (e: any) {
       console.warn('⚠️ PostgreSQL status lookup failed:', e.message);
     }
   }
   const record = memoryDb.mediaFiles.get(Number(mediaId));
-  return record ? record.status : null;
+  return record ? { status: record.status, error: record.error_message || null } : null;
 }
 
 export async function dbInsertSegment(

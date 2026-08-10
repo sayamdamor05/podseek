@@ -436,7 +436,8 @@ ${formattedInputText}`,
     await dbUpdateMediaStatus(mediaId, 'completed');
     console.log(`🎉 Successfully completed processing media ID: ${mediaId}`);
   } catch (error: any) {
-    await dbUpdateMediaStatus(mediaId, 'failed');
-    console.error('❌ Pipeline Worker Error:', error.message);
+    const errorMsg = error.message || 'Media processing failed.';
+    await dbUpdateMediaStatus(mediaId, 'failed', errorMsg);
+    console.error('❌ Pipeline Worker Error:', errorMsg);
   }
 }

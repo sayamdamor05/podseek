@@ -602,8 +602,9 @@ ${formattedInputText}`,
     await dbUpdateMediaStatus(mediaId, 'completed');
     console.log(`🎉 Successfully completed processing media ID: ${mediaId}`);
   } catch (error) {
-    await dbUpdateMediaStatus(mediaId, 'failed');
-    console.error('❌ Pipeline Worker Error:', error.message);
+    const errorMsg = error.message || 'Media processing failed.';
+    await dbUpdateMediaStatus(mediaId, 'failed', errorMsg);
+    console.error('❌ Pipeline Worker Error:', errorMsg);
   }
 }
 
@@ -616,12 +617,12 @@ app.get('/api/media-status', async (req, res) => {
       return res.status(400).json({ error: 'Missing mediaId' });
     }
 
-    const status = await dbGetMediaStatus(mediaId);
-    if (!status) {
+    const statusObj = await dbGetMediaStatus(mediaId);
+    if (!statusObj) {
       return res.status(404).json({ status: 'not_found' });
     }
 
-    res.json({ status });
+    res.json({ status: statusObj.status, error: statusObj.error || null });
   } catch (error) {
     console.error('Media status lookup error:', error.message);
     res.status(500).json({ error: 'Failed to get media status' });
@@ -652,10 +653,12 @@ app.post('/api/search', async (req, res) => {
   try {
     const { query, mediaId } = req.body;
 
-    const status = await dbGetMediaStatus(mediaId);
-    if (!status) {
+    const statusObj = await dbGetMediaStatus(mediaId);
+    if (!statusObj) {
       return res.status(404).json({ error: 'Media not found.' });
     }
+
+    const status = statusObj.status;
 
     let queryVector = null;
     if (process.env.GEMINI_API_KEY && query) {
@@ -680,7 +683,7 @@ app.post('/api/search', async (req, res) => {
         return res.json({ results: [], processing: true });
       }
       if (status === 'failed') {
-        return res.json({ results: [], error: 'Media processing failed. Please retry.' });
+        return res.json({ results: [], error: statusObj.error || 'Media processing failed. Please retry.' });
       }
       return res.json({ results: [] });
     }
