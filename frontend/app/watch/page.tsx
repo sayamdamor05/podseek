@@ -13,7 +13,7 @@ interface SearchResult {
   snippet?: string;
 }
 
-const API_BASE = '';
+const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || '';
 
 function WatchWorkspace() {
   const router = useRouter();
@@ -54,7 +54,7 @@ function WatchWorkspace() {
     setProcessingProgress(12);
 
     let cancelled = false;
-    let intervalId: any = null;
+    let intervalId: number | null = null;
 
     const pollProcessingStatus = async () => {
       try {
@@ -233,8 +233,8 @@ function WatchWorkspace() {
 
   return (
     <div className="flex h-screen w-full flex-col bg-[#f8fbff] text-slate-950 overflow-hidden">
-      <div className="border-b border-slate-200 bg-white/95 px-4 py-4 shadow-sm shadow-slate-200/50 backdrop-blur-sm">
-        <div className="mx-auto flex w-full max-w-6xl flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+      <header className="border-b border-slate-200 bg-white/95 px-4 py-4 shadow-sm shadow-slate-200/50 backdrop-blur-sm">
+        <nav aria-label="Podseek workspace navigation" className="mx-auto flex w-full max-w-6xl flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <button
               type="button"
@@ -247,6 +247,8 @@ function WatchWorkspace() {
           <form onSubmit={handleLoadNewVideo} className="flex w-full flex-col gap-3 sm:w-[520px] sm:flex-row">
             <input
               type="url"
+              id="new-video-url"
+              aria-label="New YouTube video URL"
               value={newUrl}
               onChange={(e) => setNewUrl(e.target.value)}
               placeholder="New YouTube video link"
@@ -261,8 +263,8 @@ function WatchWorkspace() {
               {isIngesting ? 'Analyzing…' : 'Analyze'}
             </button>
           </form>
-        </div>
-      </div>
+        </nav>
+      </header>
 
       <div className="flex flex-1 flex-col lg:flex-row min-h-0 p-4 sm:p-6 gap-6 lg:gap-0 overflow-y-auto lg:overflow-hidden">
       <div className="flex flex-col w-full aspect-video lg:aspect-auto lg:flex-1 min-w-0 rounded-[32px] border border-slate-200 bg-white shadow-[0_32px_110px_rgba(59,130,246,0.12)] transition-transform duration-300 hover:-translate-y-1 overflow-hidden shrink-0 lg:shrink">
@@ -298,7 +300,7 @@ function WatchWorkspace() {
       </div>
 
       {/* ── RIGHT: Semantic search panel ── */}
-      <div className="w-full lg:max-w-[420px] shrink-0 flex flex-col rounded-[32px] border border-slate-200 bg-[#f6f9ff] p-4 shadow-[0_32px_90px_rgba(37,99,235,0.15)] lg:ml-6 h-[550px] lg:h-auto min-h-0">
+      <div className="w-full lg:max-w-[420px] shrink-0 flex flex-col rounded-[32px] border border-slate-200 bg-[#f6f9ff] p-4 shadow-[0_32px_90px_rgba(37,99,235,0.15)] lg:ml-6 h-[550px] max-h-[80vh] lg:h-auto lg:max-h-none min-h-0">
 
         {/* Header */}
         <div className="px-5 pt-5 pb-4 border-b border-slate-200">
@@ -315,7 +317,7 @@ function WatchWorkspace() {
                   ? 'Analyzing video and preparing search...'
                   : processingStatus === 'failed'
                     ? 'Processing failed. Please try again.'
-                    : iframeLoaded
+                    : processingStatus === 'completed'
                       ? 'Semantic search is ready.'
                       : 'Loading video environment...'}
               </div>
@@ -329,6 +331,7 @@ function WatchWorkspace() {
             <div className="flex gap-2">
               <input
                 type="text"
+                aria-label="Search video by meaning"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleSearch()}

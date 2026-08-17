@@ -88,31 +88,34 @@ async function dbInsertMediaFile(videoUrl) {
   return id;
 }
 
-async function dbUpdateMediaStatus(mediaId, status) {
+async function dbUpdateMediaStatus(mediaId, status, errorMessage = null) {
   if (pool) {
     try {
-      await pool.query("UPDATE media_files SET status = $1 WHERE id = $2", [status, Number(mediaId)]);
+      await pool.query("UPDATE media_files SET status = $1, error_message = $2 WHERE id = $3", [status, errorMessage || null, Number(mediaId)]);
       return;
     } catch (e) {
       console.warn('⚠️ PostgreSQL status update failed:', e.message);
     }
   }
   const record = memoryDb.mediaFiles.get(Number(mediaId));
-  if (record) record.status = status;
+  if (record) {
+    record.status = status;
+    record.error_message = errorMessage || null;
+  }
 }
 
 async function dbGetMediaStatus(mediaId) {
   await ensureDbInit();
   if (pool) {
     try {
-      const mediaRes = await pool.query('SELECT status FROM media_files WHERE id = $1', [Number(mediaId)]);
-      if (mediaRes.rows.length > 0) return mediaRes.rows[0].status;
+      const mediaRes = await pool.query('SELECT status, error_message FROM media_files WHERE id = $1', [Number(mediaId)]);
+      if (mediaRes.rows.length > 0) return { status: mediaRes.rows[0].status, error: mediaRes.rows[0].error_message || null };
     } catch (e) {
       console.warn('⚠️ PostgreSQL status lookup failed:', e.message);
     }
   }
   const record = memoryDb.mediaFiles.get(Number(mediaId));
-  return record ? record.status : null;
+  return record ? { status: record.status, error: record.error_message || null } : null;
 }
 
 async function dbInsertSegment(mediaId, start, end, text, embeddingJson, sentencesJson = null) {
@@ -185,6 +188,9 @@ async function initDb() {
 
   await pool.query(`
     ALTER TABLE transcript_segments ADD COLUMN IF NOT EXISTS sentences JSONB;
+  `);
+  await pool.query(`
+    ALTER TABLE media_files ADD COLUMN IF NOT EXISTS error_message TEXT;
   `);
   dbInitialized = true;
 }

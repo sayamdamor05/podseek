@@ -18,7 +18,7 @@ export default function WatchPage() {
     e?.preventDefault();
     if (newUrl.trim() !== '') {
       setIsIngesting(true);
-      const API_BASE = '';
+      const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || '';
       try {
         let fetchedTitle = 'Analyzed Media';
         try {
@@ -135,6 +135,11 @@ export default function WatchPage() {
       mouse.x = -9999;
       mouse.y = -9999;
     };
+    // Re-initializes particles after a window resize so they stay within bounds
+    const onResize = () => {
+      dims = resize();
+      initParticles(dims.width, dims.height);
+    };
 
     let dims = resize();
 
@@ -182,16 +187,15 @@ export default function WatchPage() {
       animationId = requestAnimationFrame(draw);
     };
 
-    // Setup and start
-    dims = resize();
+    // Setup and start (dims already set above; initParticles sets initial positions)
     initParticles(dims.width, dims.height);
     draw();
 
-    window.addEventListener('resize', resize);
+    window.addEventListener('resize', onResize);
     window.addEventListener('mousemove', onMouseMove);
     window.addEventListener('mouseleave', onMouseLeave);
     return () => {
-      window.removeEventListener('resize', resize);
+      window.removeEventListener('resize', onResize);
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseleave', onMouseLeave);
       cancelAnimationFrame(animationId);
@@ -207,7 +211,7 @@ export default function WatchPage() {
             <h1 className="text-6xl font-black tracking-[-0.04em] text-slate-950 sm:text-7xl">
               Podseek
             </h1>
-            <h2 className="mx-auto mt-6 max-w-2xl text-2xl font-bold tracking-tight text-slate-805 text-slate-800 sm:text-3xl leading-snug">
+            <h2 className="mx-auto mt-6 max-w-2xl text-2xl font-bold tracking-tight text-slate-800 sm:text-3xl leading-snug">
               Jump straight to the moments that matter.
             </h2>
             <p className="mx-auto mt-4 max-w-2xl text-base leading-8 text-slate-700 sm:text-lg">
@@ -256,7 +260,7 @@ export default function WatchPage() {
 
                 <form onSubmit={handleLoadNewVideo} className="mx-auto mt-12 flex w-full max-w-2xl flex-col gap-4 rounded-[28px] border border-slate-200 bg-[#f7fbff] p-5 shadow-[0_20px_60px_rgba(30,64,175,0.08)]">
                   <div className="space-y-4">
-                    <label className="block text-xs uppercase tracking-[0.28em] text-slate-800">YouTube video</label>
+                    <label htmlFor="search-query-input" className="block text-xs uppercase tracking-[0.28em] text-slate-800">YouTube video</label>
                     <input
                       type="url"
                       id="search-query-input"
@@ -271,8 +275,7 @@ export default function WatchPage() {
                     {/* Comments input removed from the front page */}
 
                   <button
-                    type="button"
-                    onClick={() => handleLoadNewVideo()}
+                    type="submit"
                     disabled={isIngesting}
                     className="inline-flex w-full items-center justify-center rounded-2xl bg-red-400 px-5 py-3 text-sm font-semibold text-white shadow-[0_16px_40px_rgba(239,68,68,0.18)] transition hover:bg-red-200 disabled:cursor-not-allowed disabled:bg-red-200"
                   >
@@ -289,10 +292,8 @@ export default function WatchPage() {
         <div className="mx-auto flex max-w-5xl flex-col gap-3 text-sm text-slate-600 sm:flex-row sm:items-center sm:justify-between">
           <p className="font-semibold text-slate-900">Podseek</p>
           <div className="flex flex-wrap justify-center gap-4 sm:justify-end">
-            <a href="#features" className="text-slate-700 transition hover:text-blue-600">Features</a>
-            <a href="#watch" className="text-slate-700 transition hover:text-blue-600">Watch</a>
-            <a href="#about" className="text-slate-700 transition hover:text-blue-600">About</a>
-            <a href="#contact" className="text-slate-700 transition hover:text-blue-600">Contact</a>
+            <a href="#search" className="text-slate-700 transition hover:text-blue-600">Analyze</a>
+            <a href="/watch" className="text-slate-700 transition hover:text-blue-600">Watch</a>
           </div>
         </div>
       </footer>

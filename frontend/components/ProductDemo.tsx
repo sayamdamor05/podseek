@@ -536,9 +536,9 @@ export default function ProductDemo({ onTryManually }: ProductDemoProps) {
                             Clip {ch.id}
                           </span>
                         </div>
-                        <h5 className={`text-[9px] md:text-xs font-bold ${isActive ? 'text-red-500' : 'text-slate-800'}`}>
+                        <h4 className={`text-[9px] md:text-xs font-bold ${isActive ? 'text-red-500' : 'text-slate-800'}`}>
                           {ch.title}
-                        </h5>
+                        </h4>
                         <p className="hidden md:block text-[10px] text-slate-500 leading-normal line-clamp-2">
                           {ch.description}
                         </p>

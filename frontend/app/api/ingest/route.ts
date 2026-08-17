@@ -13,10 +13,12 @@ export async function POST(request: Request) {
 
     const mediaId = await dbInsertMediaFile(videoUrl);
 
-    // Await processing in serverless to ensure it completes before container freezes
-    await processAudioJob(mediaId, videoUrl, {
+    // Fire-and-forget: do NOT await — serverless functions (Netlify/Vercel) have
+    // strict timeout limits (~10–26 s) which the full pipeline will always exceed.
+    // The client polls /api/media-status to track progress.
+    processAudioJob(mediaId, videoUrl, {
       commentFeed: comments || commentFeed || [],
-    });
+    }).catch((err: any) => console.error('Background processAudioJob error:', err?.message));
 
     return NextResponse.json({ success: true, mediaId });
   } catch (error: any) {
@@ -24,3 +26,4 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: `Ingest failed: ${error.message}` }, { status: 500 });
   }
 }
+
