@@ -13,6 +13,15 @@ export default function WatchPage() {
   const [newUrl, setNewUrl] = useState('');
   const [isIngesting, setIsIngesting] = useState(false);
 
+  // --- PRE-WARM: ping the backend silently on mount so Render wakes up
+  // before the user clicks Analyze (free tier cold starts take ~50s)
+  useEffect(() => {
+    const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL;
+    if (BACKEND) {
+      fetch(`${BACKEND}/api/media-status?id=0`).catch(() => {/* expected — just waking the server */});
+    }
+  }, []);
+
   // --- NEW TOP SEARCH BAR LOGIC ---
   const handleLoadNewVideo = async (e?: React.FormEvent<HTMLFormElement>) => {
     e?.preventDefault();
@@ -28,26 +37,44 @@ export default function WatchPage() {
             if (titleData.title) fetchedTitle = titleData.title;
           }
         } catch {
-          // oEmbed fallback
+          // oEmbed fallback — title not critical
         }
 
-        const res = await fetch(`${API_BASE}/api/ingest`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ videoUrl: newUrl })
-        });
-        const data = await res.json();
+        // Try the primary backend (Render). If it fails for any reason
+        // (cold start, CORS, Brave Shields) fall back to the Netlify API route.
+        let data: any = null;
+        try {
+          const res = await fetch(`${API_BASE}/api/ingest`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ videoUrl: newUrl }),
+          });
+          data = await res.json();
+        } catch (primaryErr) {
+          if (API_BASE) {
+            // Primary (Render) failed — silently fall back to Netlify route
+            console.warn('Primary backend unavailable, falling back to Netlify route:', primaryErr);
+            const fallback = await fetch('/api/ingest', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ videoUrl: newUrl }),
+            });
+            data = await fallback.json();
+          } else {
+            throw primaryErr;
+          }
+        }
 
-        if (data.mediaId) {
+        if (data?.mediaId) {
           const safeUrl = encodeURIComponent(newUrl);
           const safeTitle = encodeURIComponent(fetchedTitle);
           router.push(`/watch?id=${data.mediaId}&url=${safeUrl}&title=${safeTitle}`);
           setNewUrl('');
         } else {
-          alert(data.error || "Failed to start processing. Check backend logs.");
+          alert(data?.error || 'Failed to start processing. Check backend logs.');
         }
-      } catch {
-        alert("Server connection failed. Is your backend running?");
+      } catch (err: any) {
+        alert(`Connection failed: ${err?.message || 'Unknown error'}. Check your backend.`);
       } finally {
         setIsIngesting(false);
       }
