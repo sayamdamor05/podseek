@@ -427,35 +427,77 @@ function adaptiveSegmentation(sentences, sentenceEmbeddings) {
   return segments.length > 0 ? segments : null;
 }
 
-// Uses youtube-transcript package
-async function fetchNativeTranscript(videoId) {
-  let YoutubeTranscript;
-  try {
-    const mod = await import('youtube-transcript');
-    YoutubeTranscript = mod.YoutubeTranscript || mod.default?.YoutubeTranscript || mod.default;
-  } catch (e) {
-    throw new Error('youtube-transcript package not installed.');
+// Fetch transcript via Supadata API (handles IP rotation, no YouTube blocking)
+async function fetchTranscriptViaSupadata(videoUrl) {
+  const apiKey = process.env.SUPADATA_API_KEY;
+  if (!apiKey) throw new Error('SUPADATA_API_KEY not configured.');
+
+  const url = `https://api.supadata.ai/v1/transcript?url=${encodeURIComponent(videoUrl)}&lang=en`;
+  const res = await fetch(url, {
+    headers: { 'x-api-key': apiKey },
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    const msg = err?.message || err?.error || `Supadata error ${res.status}`;
+    throw new Error(msg);
   }
 
+  const data = await res.json();
+
+  // If async job: not supported in this flow (native transcripts return immediately)
+  if (data.jobId) throw new Error('Supadata returned async job — not supported for this video.');
+
+  const chunks = Array.isArray(data.content) ? data.content : [];
+  if (chunks.length === 0) throw new Error('Transcript returned empty. Video may not have captions.');
+
+  return chunks.map((c) => ({
+    start: (c.offset ?? 0) / 1000,
+    text: (c.text ?? '').trim(),
+  })).filter((s) => s.text.length > 0);
+}
+
+// Fallback: youtube-transcript package (direct timedtext endpoint)
+async function fetchTranscriptViaPackage(videoId) {
+  const mod = await import('youtube-transcript');
+  const YoutubeTranscript = mod.YoutubeTranscript || mod.default?.YoutubeTranscript || mod.default;
   let raw;
   try {
     raw = await YoutubeTranscript.fetchTranscript(videoId, { lang: 'en' });
-  } catch (e) {
-    try {
-      raw = await YoutubeTranscript.fetchTranscript(videoId);
-    } catch (e2) {
-      throw new Error(`Could not fetch transcript: ${e2.message}`);
-    }
+  } catch {
+    raw = await YoutubeTranscript.fetchTranscript(videoId);
   }
-
   if (!raw || raw.length === 0) {
     throw new Error('Transcript returned empty. Video may not have captions.');
   }
-
   return raw.map((item) => ({
     start: typeof item.offset === 'number' ? item.offset / 1000 : (item.start ?? 0),
     text: item.text?.trim() ?? '',
   })).filter((item) => item.text.length > 0);
+}
+
+// Main transcript fetcher: tries Supadata first (reliable, no IP blocking), falls back to youtube-transcript
+async function fetchNativeTranscript(videoId, videoUrl) {
+  // Try Supadata first (if API key is configured)
+  if (process.env.SUPADATA_API_KEY) {
+    try {
+      console.log(`🎯 Trying Supadata API for ${videoId}...`);
+      const result = await fetchTranscriptViaSupadata(videoUrl);
+      console.log(`✅ Supadata succeeded with ${result.length} segments.`);
+      return result;
+    } catch (supadataErr) {
+      console.warn(`⚠️ Supadata failed: ${supadataErr.message}. Falling back to youtube-transcript...`);
+    }
+  }
+
+  // Fallback to youtube-transcript (may be blocked by YouTube on cloud IPs)
+  try {
+    const result = await fetchTranscriptViaPackage(videoId);
+    console.log(`✅ youtube-transcript fallback succeeded with ${result.length} segments.`);
+    return result;
+  } catch (fallbackErr) {
+    throw new Error(`Could not fetch transcript: ${fallbackErr.message}`);
+  }
 }
 
 export async function processAudioJob(mediaId, videoUrl, options = {}) {
@@ -477,7 +519,7 @@ export async function processAudioJob(mediaId, videoUrl, options = {}) {
       }));
     } else {
       console.log(`📡 Fetching captions for Video ID: ${videoId}...`);
-      const rawTranscript = await fetchNativeTranscript(videoId);
+      const rawTranscript = await fetchNativeTranscript(videoId, videoUrl);
       console.log(`✅ Got ${rawTranscript.length} caption lines.`);
 
       if (!rawTranscript || rawTranscript.length === 0) {
