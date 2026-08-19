@@ -230,9 +230,9 @@ export default function WatchPage() {
   }, []);
 
   return (
-    <div className="relative min-h-screen overflow-hidden bg-[#f8fbff] text-slate-950 pb-28">
+    <div className="relative min-h-screen flex flex-col overflow-hidden bg-[#f8fbff] text-slate-950">
       <canvas ref={canvasRef} className="pointer-events-none fixed inset-0 z-0" />
-      <div className="relative z-10">
+      <div className="relative z-10 flex-1">
         <section className="min-h-screen flex items-center justify-center px-4 py-6 sm:px-6">
           <div className="mx-auto max-w-3xl text-center">
             <h1 className="text-6xl font-black tracking-[-0.04em] text-slate-950 sm:text-7xl">
@@ -315,7 +315,7 @@ export default function WatchPage() {
         </section>
       </div>
 
-      <footer className="fixed bottom-0 left-0 right-0 z-20 border-t border-slate-200 bg-white/95 py-4 px-4 shadow-[0_-16px_40px_rgba(15,23,42,0.08)] backdrop-blur sm:px-6">
+      <footer className="mt-auto relative z-20 border-t border-slate-200 bg-white/95 py-4 px-4 shadow-[0_-16px_40px_rgba(15,23,42,0.08)] backdrop-blur sm:px-6">
         <div className="mx-auto flex max-w-5xl flex-col gap-3 text-sm text-slate-600 sm:flex-row sm:items-center sm:justify-between">
           <p className="font-semibold text-slate-900">Podseek</p>
           <div className="flex flex-wrap justify-center gap-4 sm:justify-end">
