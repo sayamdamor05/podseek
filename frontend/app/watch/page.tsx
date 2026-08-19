@@ -97,6 +97,7 @@ function WatchWorkspace() {
       } catch {
         if (!cancelled) {
           setProcessingStatus('failed');
+          setError('Server connection failed. Please check if your backend is running.');
           setProcessingProgress(0);
         }
       }
