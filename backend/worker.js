@@ -608,7 +608,17 @@ ${formattedInputText}`,
     await dbUpdateMediaStatus(mediaId, 'completed');
     console.log(`🎉 Successfully completed processing media ID: ${mediaId}`);
   } catch (error) {
-    const errorMsg = error.message || 'Media processing failed.';
+    let errorMsg = error.message || 'Media processing failed.';
+    
+    // Make youtube-transcript errors more user-friendly
+    if (errorMsg.includes('solving a captcha') || errorMsg.includes('too many requests')) {
+      errorMsg = 'YouTube blocked the server from fetching the transcript. Please try another video or try again later.';
+    } else if (errorMsg.includes('Transcript is disabled')) {
+      errorMsg = 'This video does not have closed captions/transcripts enabled.';
+    } else if (errorMsg.includes('Could not fetch transcript')) {
+      errorMsg = 'Failed to fetch the video transcript. It might be disabled or age-restricted.';
+    }
+
     await dbUpdateMediaStatus(mediaId, 'failed', errorMsg);
     console.error('❌ Pipeline Worker Error:', errorMsg);
   }
