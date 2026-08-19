@@ -63,6 +63,7 @@ function WatchWorkspace() {
           if (res.status === 404) {
             if (!cancelled) {
               setProcessingStatus('failed');
+              setError('Media not found. The server may have restarted and lost in-memory data. Please analyze the video again.');
               setProcessingProgress(0);
             }
             return;
@@ -316,7 +317,7 @@ function WatchWorkspace() {
                 {processingStatus === 'processing'
                   ? 'Analyzing video and preparing search...'
                   : processingStatus === 'failed'
-                    ? 'Processing failed. Please try again.'
+                    ? error || 'Processing failed. Please try again.'
                     : processingStatus === 'completed'
                       ? 'Semantic search is ready.'
                       : 'Loading video environment...'}
